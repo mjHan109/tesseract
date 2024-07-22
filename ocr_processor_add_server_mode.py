@@ -172,13 +172,16 @@ def main(port=None):
     try:
         if port is not None:
             server_url = f"http://{tika_server_ip}:{port}/tika"
-            with ThreadPoolExecutor(max_workers=max_tika_ocr_thread) as executor:
-                for root, _, files in os.walk(source_path):
-                    for file in files:
-                        file_path = os.path.join(root, file)
-                        if any(file_path.lower().endswith(ext) for ext in image_extensions):
-                            executor.submit(process_image, file_path, json_data, server_url)
-                        time.sleep(0.5)
+            try:
+                with ThreadPoolExecutor(max_workers=max_tika_ocr_thread) as executor:
+                    for root, _, files in os.walk(source_path):
+                        for file in files:
+                            file_path = os.path.join(root, file)
+                            if any(file_path.lower().endswith(ext) for ext in image_extensions):
+                                executor.submit(process_image, file_path, json_data, server_url)
+                            time.sleep(0.5)
+            except Exception as e:
+                log_info.status_info_print(f"ThreadPool 오류 발생 : {str(e)}")  
         else:
             server_urls = [f"http://{tika_server_ip}:{tika_server_port + i}/tika" for i in range(tika_ocr_server_count)]
             server_cycle = itertools.cycle(server_urls)
