@@ -110,8 +110,6 @@ def save_as_json(file_path, json_data, metainfo, body_info):
         document_info["file"]["path"] = file_path
         document_info["file"]["extension"] = file_extension[1:]
         document_info["file"]["size"] = metadata_info["size"]
-        document_info["file"]["type"] = metainfo["Content-Type"]
-        document_info["file"]["mime_type"] = metainfo["Content-Type"]
         document_info["file"]["mtime"] = metadata_info["mtime"]
         document_info["file"]["ctime"] = metadata_info["created"]
         document_info["file"]["meta_info"] = metadata_info
@@ -120,14 +118,21 @@ def save_as_json(file_path, json_data, metainfo, body_info):
         document_info["title"] = file_name
         document_info["uuid"] = uuid_str
         document_info["json_write_time"] = now.strftime('%Y-%m-%dT%H:%M:%S.%fZ')
+
         if body_info is not None:
             document_info["content"] = body_info
             document_info["summary"] = body_info[:300]
+            document_info["tags"].append("normal")
+        if metainfo is not None:
+            document_info["file"]["type"] = metainfo["Content-Type"]
+            document_info["file"]["mime_type"] = metainfo["Content-Type"]
         else:
-            document_info["tags"].append("exception")
+            document_info["file"]["type"] = metadata_info["mime_type"]
+            document_info["file"]["mime_type"] = metadata_info["mime_type"]
 
+        if body_info is None:
+            document_info["tags"].append("exception")
         document_info["tags"].append("file")
-        document_info["tags"].append("normal")
 
     except Exception as e:
         document_info["tags"].append("exception")
@@ -179,17 +184,20 @@ def main():
             server_urls = [f"http://{tika_server_ip}:{tika_server_port + i}/tika" for i in range(tika_ocr_server_count)]
             server_cycle = itertools.cycle(server_urls)
 
-            with ThreadPoolExecutor(max_workers=max_tika_ocr_thread) as executor:
-                futures = []
-                for root, _, files in os.walk(source_path):
-                    for file in files:
-                        file_path = os.path.join(root, file)
-                        if any(file_path.lower().endswith(ext) for ext in image_extensions):
-                            server_url = next(server_cycle)
-                            futures.append(executor.submit(process_image, file_path, json_data, server_url))
+            try:
+                with ThreadPoolExecutor(max_workers=max_tika_ocr_thread) as executor:
+                    futures = []
+                    for root, _, files in os.walk(source_path):
+                        for file in files:
+                            file_path = os.path.join(root, file)
+                            if any(file_path.lower().endswith(ext) for ext in image_extensions):
+                                server_url = next(server_cycle)
+                                futures.append(executor.submit(process_image, file_path, json_data, server_url))
 
-                concurrent.futures.wait(futures)
-                executor.shutdown(wait=True)
+                    concurrent.futures.wait(futures)
+                    executor.shutdown(wait=True)
+            except Exception as e:
+                log_info.status_info_print(f"{file_path}, ThreadPool 오류 발생 : {str(e)}")
 
     except Exception as e:
         message = f"config.json 을 읽는 도중 오류 발생 : {str(e)}"
