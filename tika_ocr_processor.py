@@ -1,4 +1,5 @@
 import os
+import sys
 import time
 import json
 import uuid
@@ -7,12 +8,18 @@ from tika import parser
 from concurrent.futures import ThreadPoolExecutor
 import itertools
 import requests
-import magic
 import log_info
+import threading
+import concurrent.futures
 import main_utility as main_ut
 from requests.adapters import HTTPAdapter
 from requests.packages.urllib3.util.retry import Retry  # type: ignore
-import sys  # 추가된 모듈
+
+
+files_index_exception_count = 0
+files_index_success_count = 0
+files_index_exception_count_lock = threading.Lock()
+files_index_success_count_lock = threading.Lock()
 
 def config_reading(json_file_name):
     current_directory = os.getcwd()
@@ -24,47 +31,53 @@ def config_reading(json_file_name):
         log_info.status_info_print(f"{current_directory} - {json_file_name} 파일을 찾을 수 없습니다.")
         return None
 
-def create_session_with_retries():
-    session = requests.Session()
-    retry = Retry(
-        total=5,
-        read=10,
-        connect=5,
-        backoff_factor=0.3,
-        status_forcelist=(500, 502, 504),
-        allowed_methods=["HEAD", "GET", "OPTIONS", "POST"]
-    )
-    adapter = HTTPAdapter(max_retries=retry)
-    session.mount("http://", adapter)
-    session.mount("https://", adapter)
-    return session
+def increment_files_index_exception_count():
+    global files_index_exception_count
+    with files_index_exception_count_lock:
+        files_index_exception_count += 1
 
-def check_tika_server(server_url):
-    session = create_session_with_retries()
+def increment_files_index_success_count():
+    global files_index_success_count
+    with files_index_success_count_lock:
+        files_index_success_count += 1
+
+
+def check_tika_server(server_url, file_path):
     try:
-        response = session.get(server_url, timeout=10)
-        return response.status_code == 200
+        response = requests.get(server_url, timeout=120)
+        if response.status_code == 200:
+            return True
+        else:
+            log_info.status_info_print(f"Tika 서버 응답 상태 코드 : {response.status_code}, {file_path}")
     except requests.exceptions.RequestException as e:
-        log_info.status_info_print(f"Failed to connect to Tika server at {server_url}: {e}")
+        log_info.status_info_print(f"Failed to connect to Tika server at {server_url}: {str(e)}")
         return False
 
 def extract_text_from_image(file_path, server_url):
     headers = {
         "X-Tika-OCRLanguage": "kor+eng+jpn+chi_sim+chi_tra+spa+fra+ara"
     }
+    try:
+        log_info.status_info_print(f"Sending request to Tika server for file: {file_path}, {server_url}")
+        response = parser.from_file(file_path, headers=headers)
+        # response = parser.from_file(file_path, serverEndpoint=server_url, headers=headers)
+        log_info.status_info_print(f"Received response from Tika server for file: {file_path}, {server_url}, response: {response}")
 
-    response = parser.from_file(file_path, serverEndpoint=server_url, headers=headers)
+    except Exception as e:
+        log_info.status_info_print(f"Error extracting text from image {file_path}: {str(e)}")
+        return None, None
 
-    if response is not None:
-        status = response.get('status', None)
-        if status == 200:
-            try:
-                body_info = response.get('content', None)
-                metainfo = response.get('metadata', None)
-                return metainfo, body_info
-            except Exception as e:
-                log_info.status_info_print(f"{file_path}, Error with : {str(e)}")
-                return None, None
+    if response is not None: 
+        try:
+            body_info = response.get('content', None)
+            metainfo = response.get('metadata', None)
+            return metainfo, body_info
+        except Exception as e:
+            log_info.status_info_print(f"{file_path}, Error with : {str(e)}")
+            return None, None
+    else:
+        log_info.status_info_print(f"{file_path}, Response is None")
+        return None, None
 
 def save_as_json(file_path, json_data, metainfo, body_info):
     try:
@@ -82,16 +95,18 @@ def save_as_json(file_path, json_data, metainfo, body_info):
         uuid_str = str(new_uuid) + '_' + str(timestamp)
 
     except Exception as e:
-        print(f"{file_path}, meta 정보 생성 중 오류 발생 : {str(e)}")
+        message = f"{file_path}, meta 정보 생성 중 오류 발생 : {str(e)}"
+        log_info.status_info_print(message)
 
     if not os.path.exists(json_path):
         os.makedirs(json_path, exist_ok=True)
 
     metadata_info, _ = main_ut.read_file_from_path(file_path, None, False)
 
-    document_info = {}
-    document_info["file"] = {}
-    document_info["tags"] = []
+    document_info = {
+        "file": {},
+        "tags": []
+    }
 
     try:
         document_info["file"]["path"] = file_path
@@ -122,34 +137,43 @@ def save_as_json(file_path, json_data, metainfo, body_info):
         document_info["tags"].append("file")
 
     except Exception as e:
+        document_info["tags"].append("file")
         document_info["tags"].append("exception")
-        print(f"{file_path}, document_info 생성 중 오류 발생 : {str(e)}")
+        # increment_files_index_exception_count()
+        log_info.status_info_print(f"{file_path}, document_info 생성 중 오류 발생 : {str(e)}")
 
     try:
         result_file = os.path.join(json_path, f"{json_file_name}.json")
         with open(result_file, 'w', encoding='utf-8') as json_file:
             json.dump(document_info, json_file, ensure_ascii=False, indent=4)
     except Exception as e:
-        print(f"{file_path}, JSON 생성 중 오류 발생 : {str(e)}")
+        message = f"{file_path}, JSON 생성 중 오류 발생 : {str(e)}"
+        log_info.status_info_print(message)
 
 def process_image(file_path, json_data, server_url):
-    max_retries = 2
+    # session = create_session()
+    max_retries = 3
     try_count = 0
 
     while try_count < max_retries:
         try_count += 1
 
-        if check_tika_server(server_url):
-            try:
+        try:
+            if check_tika_server(server_url, file_path):
+                start_time = time.time()
                 metadata, body_info = extract_text_from_image(file_path, server_url)
+                if body_info is not None:
+                    increment_files_index_success_count()
+                else:
+                    increment_files_index_exception_count()
                 save_as_json(file_path, json_data, metadata, body_info)
                 break
-            except Exception as e:
-                print(f"{file_path} 처리 중 오류 발생: {str(e)}")
-                body_info = None
-                metadata = None
-                save_as_json(file_path, json_data, metadata, body_info)
-        time.sleep(5) 
+        except TimeoutError as e:
+            if try_count >= max_retries:
+                end_time = time.time()
+                increment_files_index_success_count()
+                info_message = f"{file_path}, Timeout Error, (Time : {(end_time - start_time)}): {str(e)}"
+                log_info.status_info_print(info_message)
 
 def main(port=None):
     try:
@@ -166,47 +190,37 @@ def main(port=None):
             source_path = json_data['datainfopath']['source_path']
             source_path = os.path.join(root_path, source_path)
 
-    except Exception as e:
-        log_info.status_info_print(f"config.json 을 읽는 도중 오류 발생 : {str(e)}")
-
-    try:
-        if port is not None:
-            server_url = f"http://{tika_server_ip}:{port}/tika"
-            try:
-                with ThreadPoolExecutor(max_workers=max_tika_ocr_thread) as executor:
-                    for root, _, files in os.walk(source_path):
-                        for file in files:
-                            file_path = os.path.join(root, file)
-                            if any(file_path.lower().endswith(ext) for ext in image_extensions):
-                                executor.submit(process_image, file_path, json_data, server_url)
-                            time.sleep(0.5)
-            except Exception as e:
-                log_info.status_info_print(f"ThreadPool 오류 발생 : {str(e)}")  
-        else:
-            server_urls = [f"http://{tika_server_ip}:{tika_server_port + i}/tika" for i in range(tika_ocr_server_count)]
+            if port:
+                server_urls = [f"http://{tika_server_ip}:{port}/tika"]
+            else:
+                server_urls = [f"http://{tika_server_ip}:{tika_server_port + i}/tika" for i in range(tika_ocr_server_count)]
+            
             server_cycle = itertools.cycle(server_urls)
 
             try:
                 with ThreadPoolExecutor(max_workers=max_tika_ocr_thread) as executor:
+                    futures = []
                     for root, _, files in os.walk(source_path):
                         for file in files:
                             file_path = os.path.join(root, file)
                             if any(file_path.lower().endswith(ext) for ext in image_extensions):
                                 server_url = next(server_cycle)
-                                executor.submit(process_image, file_path, json_data, server_url)
-                            time.sleep(0.5)
+                                futures.append(executor.submit(process_image, file_path, json_data, server_url))
+                            time.sleep(3)
+                    concurrent.futures.wait(futures)
+                    executor.shutdown(wait=True)
             except Exception as e:
-                log_info.status_info_print(f"ThreadPool 오류 발생 : {str(e)}")
+                log_info.status_info_print(f"{file_path}, ThreadPool 오류 발생 : {str(e)}")
+
     except Exception as e:
-        log_info.status_info_print(f"Exception in main(): {str(e)}")
+        message = f"config.json 을 읽는 도중 오류 발생 : {str(e)}"
+        log_info.status_info_print(message)
+
 
 if __name__ == "__main__":
     start_time = time.time()
-    if len(sys.argv) > 1:
-        port = int(sys.argv[1])
-        main(port=port)
-    else:
-        main()
+    main()
     end_time = time.time()
     total_time = end_time - start_time
-    log_info.status_info_print(f"total_time : {total_time:.2f}")
+    log_info.status_info_print(f"Total_time : {total_time:.2f}")
+    log_info.status_info_print(f"성공한 파일 개수 : {files_index_success_count}\n실패한 파일 개수 : {files_index_exception_count}")

@@ -65,12 +65,11 @@ def extract_text_from_image(file_path, server_url):
         "X-Tika-OCRLanguage": "kor+eng+jpn+chi_sim+chi_tra+spa+fra+ara"
     }
 
-    response = parser.from_file(file_path, serverEndpoint=server_url, headers=headers)
+    response = parser.from_file(file_path, headers=headers)
 
     if response is not None: 
         try:
             body_info = response.get('content', None)
-            print(f"{file_path}, {body_info}")
             metainfo = response.get('metadata', None)
             return metainfo, body_info
         except Exception as e:
@@ -164,7 +163,7 @@ def process_image(file_path, json_data, server_url):
             if try_count >= max_retries:
                 end_time = time.time()
                 info_message = f"{file_path}, Timeout Error, (Time : {(end_time - start_time)}): {str(e)}"
-                print(info_message)
+        time.sleep(5)
 
 def main():
     try:
@@ -193,7 +192,7 @@ def main():
                             if any(file_path.lower().endswith(ext) for ext in image_extensions):
                                 server_url = next(server_cycle)
                                 futures.append(executor.submit(process_image, file_path, json_data, server_url))
-
+                            time.sleep(0.5)
                     concurrent.futures.wait(futures)
                     executor.shutdown(wait=True)
             except Exception as e:

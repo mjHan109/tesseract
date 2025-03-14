@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<properties>
+  <parsers>
+    <parser class="org.apache.tika.parser.ocr.TesseractOCRParser">
+      <mime>image/*</mime>
+      <mime>pdf/*</mime>
+    </parser>
+  </parsers>
+  <ocr>
+    <tesseractPath>/usr/bin/tesseract</tesseractPath>
+    <tessdataPath>/usr/local/share/tessdata</tessdataPath>
+    <languages>kor+eng+jpn+chi_sim+chi_tra+spa+fra+ara</languages>
+    <outputType>txt</outputType>
+  </ocr>
+</properties>
